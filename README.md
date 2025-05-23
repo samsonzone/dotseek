@@ -156,7 +156,7 @@ ai,artificial-intelligence,tech,innovation
 
 DotSeek loads TLD data in the following order (when `--tld-file` is not specified):
 
-1. **Remote URL**: `https://raw.githubusercontent.com/samsonzone/freedot-cli/refs/heads/main/ref/tlds.txt`
+1. **Remote URL**: `https://raw.githubusercontent.com/samsonzone/dotseek/refs/heads/main/tlds.txt`
 2. **Local File**: `tlds.txt` in current working directory
 3. **Embedded List**: Fallback embedded TLD list
 

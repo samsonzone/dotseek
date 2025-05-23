@@ -39,7 +39,7 @@ var (
 
 	cacheFilename       = ".cache.json"
 	defaultTldsFilename = "tlds.txt"
-	defaultTldURL       = "https://raw.githubusercontent.com/samsonzone/freedot-cli/refs/heads/main/ref/tlds.txt"
+	defaultTldURL       = "https://raw.githubusercontent.com/samsonzone/dotseek/refs/heads/main/tlds.txt"
 	cacheMaxAgeSeconds  = int64(24 * 60 * 60)
 
 	colorGreen          = "\033[92m"
