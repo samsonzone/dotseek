@@ -32,7 +32,7 @@ var (
 	clientIP   string
 	useSandbox bool
 
-	baseURL              string
+	baseURL              = "https://api.namecheap.com/xml.response"
 	maxDomainsPerAPICall = 50
 	requestTimeout       = 30 * time.Second
 	apiCallDelay         = 5 * time.Millisecond
@@ -42,18 +42,18 @@ var (
 	defaultTldURL       = "https://raw.githubusercontent.com/samsonzone/dotseek/refs/heads/main/tlds.txt"
 	cacheMaxAgeSeconds  = int64(24 * 60 * 60)
 
-	colorGreen          = "\033[92m"
-	colorRed            = "\033[91m"
-	colorYellow         = "\033[93m"
-	colorReset          = "\033[0m"
-	gTldKeywordsMap     map[string]string
-	gSortedTldKeys      []string
-	showTLDDescriptions *bool
+	colorGreen                  = "\033[92m"
+	colorRed                    = "\033[91m"
+	colorYellow                 = "\033[93m"
+	colorReset                  = "\033[0m"
+	gTldKeywordsMap             map[string]string
+	gSortedTldKeys              []string
+	showTLDDescriptions         *bool
+	hiddenAvailablePremiumCount int // Counter for available domains hidden due to premium status
 )
 
 //go:embed tlds.txt
-var embeddedTldsContent []byte
-var _ embed.FS
+var embeddedTldFS embed.FS
 
 type TLDData struct {
 	TLD      string
@@ -216,9 +216,6 @@ func readTLDsFromReader(r io.Reader, sourceName string) []TLDData {
 		} else {
 			fmt.Fprintf(os.Stderr, "Warning: Error reading header from TLD data source '%s': %v\n", sourceName, err)
 		}
-		if sourceName == "embedded tlds.txt" && len(embeddedTldsContent) == 0 {
-			fmt.Fprintf(os.Stderr, "Error: Embedded TLD list is empty or uninitialized.\n")
-		}
 		return tldsDataList
 	}
 	tldRegex := regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$`)
@@ -243,11 +240,9 @@ func readTLDsFromReader(r io.Reader, sourceName string) []TLDData {
 		}
 		var keywords []string
 		if len(record) > 1 && strings.TrimSpace(record[1]) != "" {
-			rawKeywords := strings.Split(record[1], ",")
-			for _, k := range rawKeywords {
-				trimmedK := strings.ToLower(strings.TrimSpace(k))
-				if trimmedK != "" {
-					keywords = append(keywords, trimmedK)
+			for _, k := range strings.Split(record[1], ",") {
+				if tk := strings.ToLower(strings.TrimSpace(k)); tk != "" {
+					keywords = append(keywords, tk)
 				}
 			}
 		}
@@ -275,7 +270,7 @@ func filterTLDsByLength(tldsList []TLDData, lengthFilterStr string) []TLDData {
 		fmt.Fprintf(os.Stderr, "Error: Invalid number in TLD length filter: '%s'.\n", matches[2])
 		os.Exit(1)
 	}
-	var filteredList []TLDData
+	var filtered []TLDData
 	for _, item := range tldsList {
 		tldLen := len(item.TLD)
 		match := false
@@ -290,544 +285,468 @@ func filterTLDsByLength(tldsList []TLDData, lengthFilterStr string) []TLDData {
 			match = tldLen >= value
 		case "=":
 			match = tldLen == value
-		default:
-			fmt.Fprintf(os.Stderr, "Error: Unknown operator in TLD length filter: '%s'.\n", operator)
-			os.Exit(1)
 		}
 		if match {
-			filteredList = append(filteredList, item)
+			filtered = append(filtered, item)
 		}
 	}
-	return filteredList
+	return filtered
 }
 
 func filterTLDsByKeywords(tldsList []TLDData, includeKeywords, excludeKeywords []string) []TLDData {
-	hasAnyKeyword := func(tldAssociatedKeywords, queryKeywords []string) bool {
-		if len(queryKeywords) == 0 {
-			return false
-		}
-		for _, qk := range queryKeywords {
-			for _, tk := range tldAssociatedKeywords {
-				if qk == tk {
+	hasAny := func(itemKeys, query []string) bool {
+		for _, q := range query {
+			for _, k := range itemKeys {
+				if q == k {
 					return true
 				}
 			}
 		}
 		return false
 	}
-	var filteredList []TLDData
+	var out []TLDData
 	for _, item := range tldsList {
-		if len(includeKeywords) > 0 && !hasAnyKeyword(item.Keywords, includeKeywords) {
+		if len(includeKeywords) > 0 && !hasAny(item.Keywords, includeKeywords) {
 			continue
 		}
-		if len(excludeKeywords) > 0 && hasAnyKeyword(item.Keywords, excludeKeywords) {
+		if len(excludeKeywords) > 0 && hasAny(item.Keywords, excludeKeywords) {
 			continue
 		}
-		filteredList = append(filteredList, item)
+		out = append(out, item)
 	}
-	return filteredList
+	return out
 }
 
-func buildDomainQueryList(baseDomainsInput []string, processedTLDs []string) ([]string, []string) {
-	var explicitDomains, generatedDomains []string
+func buildDomainQueryList(baseInputs []string, tlds []string) ([]string, []string) {
+	var explicit, generated []string
 	sldRegex := regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
-	for _, rawDomainInput := range baseDomainsInput {
-		cleanDomain := strings.ToLower(strings.TrimSpace(rawDomainInput))
-		if cleanDomain == "" {
+	for _, raw := range baseInputs {
+		d := strings.ToLower(strings.TrimSpace(raw))
+		if d == "" {
 			continue
 		}
-		if strings.Contains(cleanDomain, ".") {
-			parts := strings.Split(cleanDomain, ".")
-			validFQDN := true
-			if len(parts) < 2 {
-				validFQDN = false
-			}
-			for _, part := range parts {
-				if part == "" {
-					validFQDN = false
-					break
+		if strings.Contains(d, ".") {
+			parts := strings.Split(d, ".")
+			valid := len(parts) >= 2
+			for _, p := range parts {
+				if p == "" {
+					valid = false
 				}
 			}
-			if validFQDN {
-				explicitDomains = append(explicitDomains, cleanDomain)
-			} else {
-				fmt.Fprintf(os.Stderr, "Warning: Skipping malformed explicit domain '%s'.\n", cleanDomain)
+			if valid {
+				explicit = append(explicit, d)
 			}
-		} else {
-			if sldRegex.MatchString(cleanDomain) {
-				for _, tld := range processedTLDs {
-					generatedDomains = append(generatedDomains, fmt.Sprintf("%s.%s", cleanDomain, tld))
-				}
-			} else {
-				fmt.Fprintf(os.Stderr, "Warning: Skipping malformed base domain '%s' for TLD generation.\n", cleanDomain)
+		} else if sldRegex.MatchString(d) {
+			for _, t := range tlds {
+				generated = append(generated, fmt.Sprintf("%s.%s", d, t))
 			}
 		}
 	}
-	sort.Slice(generatedDomains, func(i, j int) bool {
-		partsI := strings.SplitN(generatedDomains[i], ".", 2)
-		tldI := ""
-		if len(partsI) > 1 {
-			tldI = partsI[1]
+	sort.Strings(explicit)
+	sort.Slice(generated, func(i, j int) bool {
+		ti := strings.SplitN(generated[i], ".", 2)[1]
+		tj := strings.SplitN(generated[j], ".", 2)[1]
+		if ti != tj {
+			return ti < tj
 		}
-		partsJ := strings.SplitN(generatedDomains[j], ".", 2)
-		tldJ := ""
-		if len(partsJ) > 1 {
-			tldJ = partsJ[1]
-		}
-		if tldI != tldJ {
-			return tldI < tldJ
-		}
-		return generatedDomains[i] < generatedDomains[j]
+		return generated[i] < generated[j]
 	})
-	sort.Strings(explicitDomains)
-	return explicitDomains, generatedDomains
+	return explicit, generated
 }
 
-func fetchTLDsFromURL(urlStr string) (io.Reader, error) {
+func fetchTLDsFromURL(u string) (io.Reader, error) {
 	client := http.Client{Timeout: requestTimeout}
-	resp, err := client.Get(urlStr)
+	resp, err := client.Get(u)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch TLDs from URL %s: %w", urlStr, err)
+		return nil, fmt.Errorf("failed to fetch TLDs from URL %s: %w", u, err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("failed to fetch TLDs from URL %s: status code %d", urlStr, resp.StatusCode)
+		return nil, fmt.Errorf("status %d fetching %s", resp.StatusCode, u)
 	}
-	bodyBytes, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read TLD response body from URL %s: %w", urlStr, err)
-	}
-	return bytes.NewReader(bodyBytes), nil
+	b, err := io.ReadAll(resp.Body)
+	return bytes.NewReader(b), err
 }
 
-func checkDomainChunkAvailability(domainChunk []string) (*NamecheapAPIResponse, error) {
+func checkDomainChunkAvailability(chunk []string) (*NamecheapAPIResponse, error) {
 	params := url.Values{}
 	params.Add("ApiUser", apiUser)
 	params.Add("ApiKey", apiKey)
 	params.Add("UserName", username)
 	params.Add("ClientIp", clientIP)
 	params.Add("Command", "namecheap.domains.check")
-	params.Add("DomainList", strings.Join(domainChunk, ","))
+	params.Add("DomainList", strings.Join(chunk, ","))
 	reqURL := baseURL + "?" + params.Encode()
 	client := http.Client{Timeout: requestTimeout}
 	resp, err := client.Get(reqURL)
 	if err != nil {
-		return nil, fmt.Errorf("request failed for domains %v: %w", domainChunk, err)
+		return nil, fmt.Errorf("request failed for %v: %w", chunk, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP Error: %d for domains %v. Response: %s", resp.StatusCode, domainChunk, string(bodyBytes))
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("HTTP %d for %v: %s", resp.StatusCode, chunk, string(b))
 	}
-	bodyBytes, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body for %v: %w", domainChunk, err)
+		return nil, err
 	}
-	var apiResponse NamecheapAPIResponse
-	cleanedBody := bytes.TrimPrefix(bodyBytes, []byte("\xef\xbb\xbf"))
-	if err := xml.Unmarshal(cleanedBody, &apiResponse); err != nil {
-		fmt.Fprintf(os.Stderr, "Raw response for problematic chunk (%v): %s\n", domainChunk, string(bodyBytes))
-		return nil, fmt.Errorf("failed to parse XML response for %v: %w", domainChunk, err)
+	var apiResp NamecheapAPIResponse
+	cleaned := bytes.TrimPrefix(body, []byte("\xef\xbb\xbf"))
+	if err := xml.Unmarshal(cleaned, &apiResp); err != nil {
+		fmt.Fprintf(os.Stderr, "Raw response for %v: %s\n", chunk, string(body))
+		return nil, err
 	}
-	return &apiResponse, nil
+	return &apiResp, nil
 }
 
 func formatResultForDisplay(
-	domainName string,
-	isAvailableFlag bool,
-	isPremium bool,
-	wasExplicitlyRequested bool,
-	showAllGenerated bool,
-	includePremiumGenerated bool,
+	domain string,
+	isAvailable, isPremium, wasExplicit bool,
+	showAll, includePremium bool,
 	sourceInfo string,
 ) *ProcessedResult {
-	if !wasExplicitlyRequested {
-		if !showAllGenerated && !isAvailableFlag {
+	if !wasExplicit {
+		if isPremium && !includePremium {
+			if isAvailable {
+				hiddenAvailablePremiumCount++
+			}
 			return nil
 		}
-		if isPremium && !includePremiumGenerated {
+		if !isAvailable && !showAll {
 			return nil
 		}
 	}
-	premiumText := ""
+	prem := ""
 	if isPremium {
-		premiumText = " $"
+		prem = " $"
 	}
-	var cPrefix, cSuffix string
-	if isAvailableFlag {
-		cPrefix = colorGreen
-		cSuffix = colorReset
-	} else {
-		if showAllGenerated || wasExplicitlyRequested {
-			cPrefix = colorRed
-			cSuffix = colorReset
-		}
+	var pre, suf string
+	if isAvailable {
+		pre, suf = colorGreen, colorReset
+	} else if wasExplicit || showAll {
+		pre, suf = colorRed, colorReset
 	}
 
-	var tldDescText string
+	var desc string
 	if *showTLDDescriptions {
-		var matchedTld string
-		for _, knownTld := range gSortedTldKeys {
-			if strings.HasSuffix(domainName, "."+knownTld) {
-				matchedTld = knownTld
+		for _, t := range gSortedTldKeys {
+			if strings.HasSuffix(domain, "."+t) {
+				desc = gTldKeywordsMap[t]
 				break
-			} else if domainName == knownTld {
-				matchedTld = knownTld
-				break
-			}
-		}
-		if matchedTld != "" {
-			if desc, ok := gTldKeywordsMap[matchedTld]; ok {
-				tldDescText = desc
 			}
 		}
 	}
 
 	return &ProcessedResult{
-		DomainName:     domainName,
-		ColorPrefix:    cPrefix,
-		ColorSuffix:    cSuffix,
-		PremiumInfo:    premiumText,
+		DomainName:     domain,
+		ColorPrefix:    pre,
+		ColorSuffix:    suf,
+		PremiumInfo:    prem,
 		SourceInfo:     sourceInfo,
-		IsAvailable:    isAvailableFlag,
-		TLDDescription: tldDescText,
+		IsAvailable:    isAvailable,
+		TLDDescription: desc,
 	}
 }
 
 func processAPIResponseChunk(
 	apiResp *NamecheapAPIResponse,
-	showAllGenerated bool,
-	includePremiumGenerated bool,
-	explicitlyRequestedDomainsMap map[string]bool,
+	showAll, includePremium bool,
+	explicitMap map[string]bool,
 	cacheData map[string]CacheEntry,
 	useCache bool,
 ) []ProcessedResult {
-	var processedResultsForChunk []ProcessedResult
+	var out []ProcessedResult
 	if apiResp == nil {
-		fmt.Fprintln(os.Stderr, "Error: processAPIResponseChunk called with nil API response.")
-		return processedResultsForChunk
+		fmt.Fprintln(os.Stderr, "Error: nil API response")
+		return out
 	}
 	if len(apiResp.Errors.ErrorList) > 0 {
-		for _, apiErr := range apiResp.Errors.ErrorList {
-			fmt.Fprintf(os.Stderr, "API Error (%s): %s\n", apiErr.Number, apiErr.Message)
+		for _, e := range apiResp.Errors.ErrorList {
+			fmt.Fprintf(os.Stderr, "API Error (%s): %s\n", e.Number, e.Message)
 		}
-		return processedResultsForChunk
+		return out
 	}
-	if len(apiResp.CommandResponse.DomainCheckResult) == 0 && len(apiResp.Errors.ErrorList) == 0 {
-		fmt.Fprintf(os.Stderr, "Warning: No DomainCheckResult elements in API response for '%s'. Status: %s.\n",
-			apiResp.CommandResponse.Type, apiResp.Status)
-		return processedResultsForChunk
-	}
-	for _, resultElement := range apiResp.CommandResponse.DomainCheckResult {
-		domain := resultElement.Domain
-		isAvailable := resultElement.Available == "true"
-		isPremium := resultElement.IsPremiumName == "true"
+	for _, r := range apiResp.CommandResponse.DomainCheckResult {
+		domain := r.Domain
+		avail := r.Available == "true"
+		prem := r.IsPremiumName == "true"
 		if useCache {
 			addDomainToCache(cacheData, domain, CachedDomainAttributes{
-				Domain: domain, Available: resultElement.Available, IsPremiumName: resultElement.IsPremiumName,
+				Domain:        domain,
+				Available:     r.Available,
+				IsPremiumName: r.IsPremiumName,
 			})
 		}
-		wasExplicitlyRequested := explicitlyRequestedDomainsMap[domain]
-		formatted := formatResultForDisplay(
-			domain, isAvailable, isPremium, wasExplicitlyRequested,
-			showAllGenerated, includePremiumGenerated, "",
-		)
-		if formatted != nil {
-			processedResultsForChunk = append(processedResultsForChunk, *formatted)
+		wasExp := explicitMap[domain]
+		if res := formatResultForDisplay(domain, avail, prem, wasExp, showAll, includePremium, ""); res != nil {
+			out = append(out, *res)
 		}
 	}
-	return processedResultsForChunk
+	return out
 }
 
 func main() {
 	loadAndSetEnvVars()
-	domainsArg := flag.String("domains", "", "Comma-separated domain names (base or FQDN).")
-	tldLengthFilter := flag.String("l", "", "Filter TLDs by length (e.g., '3', '<4', '>=5').")
-	keywordsIncludeStr := flag.String("k", "", "Comma-separated keywords to include TLDs by.")
-	keywordsExcludeStr := flag.String("ek", "", "Comma-separated keywords to exclude TLDs by.")
-	includePremium := flag.Bool("p", false, "Include premium domains in results for generated names.")
-	showAll := flag.Bool("a", false, "Show all generated domains (available and unavailable).")
-	tldFileFlag := flag.String("tld-file", "", fmt.Sprintf("Path to TLD file (overrides remote/default '%s').", defaultTldsFilename))
-	cliShowTLDDescriptions := flag.Bool("tld-descriptions", false, "Show TLD keywords (descriptions).")
-	flag.BoolVar(cliShowTLDDescriptions, "d", false, "Show TLD keywords (shorthand for --tld-descriptions)")
-	noCache := flag.Bool("no-cache", false, "Disable cache for this run.")
-	clearCache := flag.Bool("clear-cache", false, "Clear cache file and exit.")
-	cacheAge := flag.Int64("cache-age", cacheMaxAgeSeconds, "Max cache age in seconds.")
+
+	domainsArg := flag.String("domains", "", "Comma-separated domains")
+	tldLength := flag.String("l", "", "Filter TLDs by length")
+	includeKw := flag.String("k", "", "Include keywords")
+	excludeKw := flag.String("ek", "", "Exclude keywords")
+	includePremium := flag.Bool("p", false, "Include premium")
+	showAll := flag.Bool("a", false, "Show all")
+	tldFile := flag.String("tld-file", "", "Custom TLD file")
+	cliDesc := flag.Bool("tld-descriptions", false, "Show TLD keywords")
+	flag.BoolVar(cliDesc, "d", false, "Shorthand for --tld-descriptions")
+	noCache := flag.Bool("no-cache", false, "Disable cache")
+	clearCacheFlg := flag.Bool("clear-cache", false, "Clear cache")
+	cacheAge := flag.Int64("cache-age", cacheMaxAgeSeconds, "Max cache age")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [options] <domain1> [domain2 ...]\n\n", filepath.Base(os.Args[0]))
-		fmt.Fprintln(os.Stderr, "Checks domain availability via Namecheap API with caching.")
-		fmt.Fprintln(os.Stderr, "Domains can be provided as arguments or via the -domains flag (comma-separated).")
-		fmt.Fprintln(os.Stderr, "\nTLD List Loading Order (if --tld-file is NOT used):")
-		fmt.Fprintf(os.Stderr, "  1. Remote URL: %s\n  2. Local file in CWD: %s\n  3. Embedded TLD list\n", defaultTldURL, defaultTldsFilename)
-		fmt.Fprintln(os.Stderr, "\nOptions:")
+		fmt.Fprintf(os.Stderr, "Usage: %s [opts] <domain>...\n", filepath.Base(os.Args[0]))
 		flag.PrintDefaults()
-		fmt.Fprintln(os.Stderr, "\nRequired Environment Variables (or .env file):")
-		fmt.Fprintln(os.Stderr, "  NAMECHEAP_API_USER, NAMECHEAP_API_KEY, NAMECHEAP_USERNAME, NAMECHEAP_CLIENT_IP")
-		fmt.Fprintln(os.Stderr, "  NAMECHEAP_USE_SANDBOX (optional, 'true' for sandbox)")
 	}
 	flag.Parse()
-	showTLDDescriptions = cliShowTLDDescriptions
+	showTLDDescriptions = cliDesc
 
 	validateEnvVars()
-
-	if *clearCache {
+	if *clearCacheFlg {
 		clearCacheFile(cacheFilename)
 		os.Exit(0)
 	}
 
-	var domainInputs []string
+	var inputs []string
 	if *domainsArg != "" {
 		for _, d := range strings.Split(*domainsArg, ",") {
-			if trimmed := strings.TrimSpace(d); trimmed != "" {
-				domainInputs = append(domainInputs, trimmed)
+			if d = strings.TrimSpace(d); d != "" {
+				inputs = append(inputs, d)
 			}
 		}
 	}
-	for _, argDomain := range flag.Args() {
-		if trimmed := strings.TrimSpace(argDomain); trimmed != "" {
-			domainInputs = append(domainInputs, trimmed)
+	for _, d := range flag.Args() {
+		if d = strings.TrimSpace(d); d != "" {
+			inputs = append(inputs, d)
 		}
 	}
-
-	if len(domainInputs) == 0 {
-		fmt.Fprintln(os.Stderr, "Error: No domains provided.")
+	if len(inputs) == 0 {
+		fmt.Fprintln(os.Stderr, "Error: No domains provided")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	onlyBaseDomainsProvided := true
-	for _, input := range domainInputs {
-		if strings.Contains(input, ".") {
-			onlyBaseDomainsProvided = false
+	onlyBase := true
+	for _, d := range inputs {
+		if strings.Contains(d, ".") {
+			onlyBase = false
 			break
 		}
 	}
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-sigChan
+		<-sig
 		fmt.Printf("\n%sProcess interrupted.%s\n", colorYellow, colorReset)
 		os.Exit(130)
 	}()
 
-	useCacheThisRun := !*noCache
-	currentCacheData := make(map[string]CacheEntry)
-	if useCacheThisRun {
-		currentCacheData = loadCache(cacheFilename)
+	useCacheRun := !*noCache
+	cacheData := make(map[string]CacheEntry)
+	if useCacheRun {
+		cacheData = loadCache(cacheFilename)
 	}
 
-	var tldsDataList []TLDData
-	explicitTldFile := *tldFileFlag
-	if explicitTldFile != "" {
-		fmt.Printf("Info: Loading TLDs from specified file: %s\n", explicitTldFile)
-		file, err := os.Open(explicitTldFile)
+	// Load TLDs
+	var tldData []TLDData
+	if *tldFile != "" {
+		fmt.Printf("Info: Loading TLDs from %s\n", *tldFile)
+		f, err := os.Open(*tldFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening specified TLD file '%s': %v\n", explicitTldFile, err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		tldsDataList = readTLDsFromReader(file, explicitTldFile)
-		file.Close()
+		tldData = readTLDsFromReader(f, *tldFile)
+		f.Close()
 	} else {
-		fmt.Printf("Info: Fetching TLDs from remote.\n")
-		remoteReader, err := fetchTLDsFromURL(defaultTldURL)
-		if err == nil {
-			tldsDataList = readTLDsFromReader(remoteReader, defaultTldURL)
+		fmt.Println("Info: Fetching TLDs from remote.")
+		if rdr, err := fetchTLDsFromURL(defaultTldURL); err == nil {
+			tldData = readTLDsFromReader(rdr, defaultTldURL)
+		} else if f, err2 := os.Open(defaultTldsFilename); err2 == nil {
+			fmt.Println("Info: Using local tlds.txt")
+			tldData = readTLDsFromReader(f, defaultTldsFilename)
+			f.Close()
 		} else {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to fetch TLDs from remote (%s): %v\n", defaultTldURL, err)
-			fmt.Printf("Info: Attempting local TLD file: %s\n", defaultTldsFilename)
-			file, localErr := os.Open(defaultTldsFilename)
-			if localErr == nil {
-				fmt.Printf("Info: Using local TLD file: %s\n", defaultTldsFilename)
-				tldsDataList = readTLDsFromReader(file, defaultTldsFilename)
-				file.Close()
-			} else {
-				if !os.IsNotExist(localErr) {
-					fmt.Fprintf(os.Stderr, "Warning: Error opening local TLD file '%s': %v\n", defaultTldsFilename, localErr)
-				}
-				fmt.Println("Info: Using embedded TLD list as fallback.")
-				if len(embeddedTldsContent) == 0 {
-					fmt.Fprintln(os.Stderr, "Critical: Embedded TLD list is empty.")
-					os.Exit(1)
-				}
-				tldsDataList = readTLDsFromReader(bytes.NewReader(embeddedTldsContent), "embedded tlds.txt")
-			}
+			fmt.Println("Info: Using embedded TLD list")
+			e, _ := embeddedTldFS.Open("tlds.txt")
+			tldData = readTLDsFromReader(e, "embedded")
+			e.Close()
 		}
 	}
-	if len(tldsDataList) == 0 {
+	if len(tldData) == 0 {
 		fmt.Fprintln(os.Stderr, "Critical: No TLDs loaded.")
 		os.Exit(1)
 	}
-
 	gTldKeywordsMap = make(map[string]string)
-	tempSortedKeys := make([]string, 0, len(tldsDataList))
-	for _, item := range tldsDataList {
-		gTldKeywordsMap[item.TLD] = strings.Join(item.Keywords, ", ")
-		tempSortedKeys = append(tempSortedKeys, item.TLD)
+	for _, it := range tldData {
+		gTldKeywordsMap[it.TLD] = strings.Join(it.Keywords, ", ")
+		gSortedTldKeys = append(gSortedTldKeys, it.TLD)
 	}
-	sort.Slice(tempSortedKeys, func(i, j int) bool {
-		return len(tempSortedKeys[i]) > len(tempSortedKeys[j])
+	sort.Slice(gSortedTldKeys, func(i, j int) bool {
+		return len(gSortedTldKeys[i]) > len(gSortedTldKeys[j])
 	})
-	gSortedTldKeys = tempSortedKeys
 
-	if *tldLengthFilter != "" {
-		tldsDataList = filterTLDsByLength(tldsDataList, *tldLengthFilter)
+	if *tldLength != "" {
+		tldData = filterTLDsByLength(tldData, *tldLength)
 	}
-	var includeKw, excludeKw []string
-	if *keywordsIncludeStr != "" {
-		for _, k := range strings.Split(*keywordsIncludeStr, ",") {
-			if tk := strings.ToLower(strings.TrimSpace(k)); tk != "" {
-				includeKw = append(includeKw, tk)
-			}
+	var incKW, excKW []string
+	for _, k := range strings.Split(*includeKw, ",") {
+		if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
+			incKW = append(incKW, k)
 		}
 	}
-	if *keywordsExcludeStr != "" {
-		for _, k := range strings.Split(*keywordsExcludeStr, ",") {
-			if tk := strings.ToLower(strings.TrimSpace(k)); tk != "" {
-				excludeKw = append(excludeKw, tk)
-			}
+	for _, k := range strings.Split(*excludeKw, ",") {
+		if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
+			excKW = append(excKW, k)
 		}
 	}
-
-	var filteredTldsForGeneration []TLDData = tldsDataList
-	if len(includeKw) > 0 || len(excludeKw) > 0 {
-		filteredTldsForGeneration = filterTLDsByKeywords(filteredTldsForGeneration, includeKw, excludeKw)
-	}
-	finalTLDList := make([]string, len(filteredTldsForGeneration))
-	for i, item := range filteredTldsForGeneration {
-		finalTLDList[i] = item.TLD
+	if len(incKW) > 0 || len(excKW) > 0 {
+		tldData = filterTLDsByKeywords(tldData, incKW, excKW)
 	}
 
-	explicitDomains, generatedDomains := buildDomainQueryList(domainInputs, finalTLDList)
-	allDomainsToEvaluate := append(explicitDomains, generatedDomains...)
-	explicitlyRequestedDomainsMap := make(map[string]bool)
-	for _, d := range explicitDomains {
-		explicitlyRequestedDomainsMap[d] = true
+	finalTlds := make([]string, len(tldData))
+	for i, it := range tldData {
+		finalTlds[i] = it.TLD
 	}
 
-	if len(allDomainsToEvaluate) == 0 {
-		fmt.Println("No domains to check. Exiting.")
-		os.Exit(0)
+	explicit, generated := buildDomainQueryList(inputs, finalTlds)
+	all := append(explicit, generated...)
+	explicitMap := make(map[string]bool)
+	for _, e := range explicit {
+		explicitMap[e] = true
 	}
 
-	var allResultsForDisplay []ProcessedResult
-	var domainsNeedingAPICheck []string
-	var availableCount, unavailableCount, premiumCount int
+	if len(all) == 0 {
+		fmt.Println("No domains to check.")
+		return
+	}
 
-	if useCacheThisRun {
-		fmt.Printf("Evaluating %d domain(s), checking cache...\n", len(allDomainsToEvaluate))
-		for _, domainName := range allDomainsToEvaluate {
-			if entry, found := currentCacheData[domainName]; found && isCacheEntryValid(entry, *cacheAge) {
-				attrs := entry.Attributes
-				isAvailable := attrs.Available == "true"
-				isPremium := attrs.IsPremiumName == "true"
+	var results []ProcessedResult
+	var toCheck []string
+	var totalAvailable, totalUnavailable, totalPremium int
 
-				if isAvailable {
-					availableCount++
+	if useCacheRun {
+		fmt.Printf("Evaluating %d domain(s), checking cache...\n", len(all))
+		for _, d := range all {
+			if ent, ok := cacheData[d]; ok && isCacheEntryValid(ent, *cacheAge) {
+				avail := ent.Attributes.Available == "true"
+				prem := ent.Attributes.IsPremiumName == "true"
+				// patched count
+				if avail {
+					if prem {
+						totalPremium++
+					} else {
+						totalAvailable++
+					}
 				} else {
-					unavailableCount++
+					totalUnavailable++
 				}
-				if isPremium {
-					premiumCount++
-				}
-
-				formatted := formatResultForDisplay(domainName, isAvailable, isPremium,
-					explicitlyRequestedDomainsMap[domainName], *showAll, *includePremium, "")
-				if formatted != nil {
-					allResultsForDisplay = append(allResultsForDisplay, *formatted)
+				if res := formatResultForDisplay(d, avail, prem, explicitMap[d], *showAll, *includePremium, ""); res != nil {
+					results = append(results, *res)
 				}
 			} else {
-				domainsNeedingAPICheck = append(domainsNeedingAPICheck, domainName)
+				toCheck = append(toCheck, d)
 			}
 		}
-		fmt.Printf("%d from cache. %d to check via API.\n", len(allResultsForDisplay), len(domainsNeedingAPICheck))
+		fmt.Printf("%d from cache. %d to check via API.\n", len(results), len(toCheck))
 	} else {
-		fmt.Printf("Cache disabled. Evaluating %d domain(s) via API...\n", len(allDomainsToEvaluate))
-		domainsNeedingAPICheck = allDomainsToEvaluate
+		fmt.Printf("Cache disabled. Checking %d domains via API...\n", len(all))
+		toCheck = all
 	}
 
-	if len(domainsNeedingAPICheck) > 0 {
-		fmt.Printf("Checking %d domain(s) via API...\n", len(domainsNeedingAPICheck))
-		var domainChunks [][]string
-		for i := 0; i < len(domainsNeedingAPICheck); i += maxDomainsPerAPICall {
+	if len(toCheck) > 0 {
+		fmt.Printf("Checking %d domain(s) via API...\n", len(toCheck))
+		var chunks [][]string
+		for i := 0; i < len(toCheck); i += maxDomainsPerAPICall {
 			end := i + maxDomainsPerAPICall
-			if end > len(domainsNeedingAPICheck) {
-				end = len(domainsNeedingAPICheck)
+			if end > len(toCheck) {
+				end = len(toCheck)
 			}
-			domainChunks = append(domainChunks, domainsNeedingAPICheck[i:end])
+			chunks = append(chunks, toCheck[i:end])
 		}
-		for i, chunk := range domainChunks {
+		for i, chunk := range chunks {
 			if i > 0 && apiCallDelay > 0 {
 				time.Sleep(apiCallDelay)
 			}
-			fmt.Printf("\r  Processing API batch %d of %d...", i+1, len(domainChunks))
+			fmt.Printf("\r  Processing API batch %d of %d...", i+1, len(chunks))
 			apiResp, err := checkDomainChunkAvailability(chunk)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "\nError checking chunk %v: %v\n", chunk, err)
 				continue
 			}
-			if apiResp != nil {
-				if len(apiResp.Errors.ErrorList) == 0 {
-					for _, result := range apiResp.CommandResponse.DomainCheckResult {
-						if result.Available == "true" {
-							availableCount++
+			if apiResp != nil && len(apiResp.Errors.ErrorList) == 0 {
+				for _, r := range apiResp.CommandResponse.DomainCheckResult {
+					avail := r.Available == "true"
+					prem := r.IsPremiumName == "true"
+					// patched count
+					if avail {
+						if prem {
+							totalPremium++
+							// fmt.Printf("DEBUG API: Found premium domain: %s (Available:%t, Premium:%t)\n", r.Domain, avail, prem)
 						} else {
-							unavailableCount++
+							totalAvailable++
 						}
-						if result.IsPremiumName == "true" {
-							premiumCount++
-						}
+					} else {
+						totalUnavailable++
 					}
 				}
-
-				chunkResults := processAPIResponseChunk(apiResp, *showAll, *includePremium,
-					explicitlyRequestedDomainsMap, currentCacheData, useCacheThisRun)
-				allResultsForDisplay = append(allResultsForDisplay, chunkResults...)
+				chunkRes := processAPIResponseChunk(apiResp, *showAll, *includePremium, explicitMap, cacheData, useCacheRun)
+				results = append(results, chunkRes...)
 			}
 		}
 		fmt.Print("\r" + strings.Repeat(" ", 70) + "\r")
 		fmt.Println("API checks complete.")
 	}
 
-	sort.Slice(allResultsForDisplay, func(i, j int) bool {
-		resI, resJ := allResultsForDisplay[i], allResultsForDisplay[j]
-		if resI.IsAvailable != resJ.IsAvailable {
-			return !resI.IsAvailable
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].IsAvailable != results[j].IsAvailable {
+			return results[i].IsAvailable
 		}
-		return resI.DomainName < resJ.DomainName
+		return results[i].DomainName < results[j].DomainName
 	})
 
-	fmt.Printf("\n--- Results (%d matching criteria) ---\n", len(allResultsForDisplay))
-	if len(allResultsForDisplay) == 0 {
+	fmt.Printf("\n--- Results (%d matching criteria) ---\n", len(results))
+	if len(results) == 0 {
 		fmt.Println("No domains matched your criteria.")
 	} else {
-		for _, res := range allResultsForDisplay {
-			if *showTLDDescriptions && res.TLDDescription != "" {
-				fmt.Printf("%s%s%s\t\t%s%s\n",
-					res.ColorPrefix, res.DomainName, res.ColorSuffix,
-					res.TLDDescription,
-					res.PremiumInfo)
+		for _, r := range results {
+			if *showTLDDescriptions && r.TLDDescription != "" {
+				fmt.Printf("%s%s%s\t\t%s%s\n", r.ColorPrefix, r.DomainName, r.ColorSuffix, r.TLDDescription, r.PremiumInfo)
 			} else {
-				fmt.Printf("%s%s%s%s\n",
-					res.ColorPrefix, res.DomainName, res.ColorSuffix, res.PremiumInfo)
+				fmt.Printf("%s%s%s%s\n", r.ColorPrefix, r.DomainName, r.ColorSuffix, r.PremiumInfo)
 			}
 		}
 	}
 
-	if useCacheThisRun {
-		saveCache(cacheFilename, currentCacheData)
+	if useCacheRun {
+		saveCache(cacheFilename, cacheData)
+	}
+
+	if hiddenAvailablePremiumCount > 0 {
+		fmt.Printf("\n%sNote: %d premium domain(s) available.\n\tUse -p flag to show%s\n",
+			colorYellow, hiddenAvailablePremiumCount, colorReset)
 	}
 	if useSandbox {
 		fmt.Printf("%sNote: Using Namecheap SANDBOX environment.%s\n", colorYellow, colorReset)
 	}
-	fmt.Printf("\nFinished. Evaluated %d domains total.\n", len(allDomainsToEvaluate))
+	fmt.Printf("\nFinished. Evaluated %d domains total.\n", len(all))
 
-	if onlyBaseDomainsProvided && len(allDomainsToEvaluate) > 0 {
+	// fmt.Printf("DEBUG: Total counts - Available:%d, Unavailable:%d, Premium:%d, Hidden Available Premium:%d\n",
+	// 	totalAvailable, totalUnavailable, totalPremium, hiddenAvailablePremiumCount)
+
+	if onlyBase && len(all) > 0 {
 		fmt.Println("\n--- Summary of All Evaluated Domains ---")
-		fmt.Printf("Available:   %s%d%s\n", colorGreen, availableCount, colorReset)
-		fmt.Printf("Unavailable: %s%d%s\n", colorRed, unavailableCount, colorReset)
-		fmt.Printf("Premium:     %s%d%s\n", colorYellow, premiumCount, colorReset)
+		fmt.Printf("Available:   %s%d%s\n", colorGreen, totalAvailable, colorReset)
+		fmt.Printf("Unavailable: %s%d%s\n", colorRed, totalUnavailable, colorReset)
+		fmt.Printf("Premium:     %s%d%s\n", colorYellow, totalPremium, colorReset)
 	}
 }
