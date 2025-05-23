@@ -84,41 +84,41 @@ dotseek -domains="example.com,myapp.io,testsite"
 
 Filter by TLD length:
 ```bash
-dotseek myapp -l 3          # Only 3-character TLDs (.com, .net, .org)
-dotseek myapp -l "<4"       # TLDs shorter than 4 characters  
-dotseek myapp -l ">=5"      # TLDs 5 characters or longer
+dotseek -l 3 myapp          # Only 3-character TLDs (.com, .net, .org)
+dotseek -l "<4" myapp       # TLDs shorter than 4 characters  
+dotseek -l ">=5" myapp      # TLDs 5 characters or longer
 ```
 
 Filter by keywords:
 ```bash
-dotseek myapp -k "tech,business"     # Include tech/business TLDs
-dotseek myapp -ek "adult,gambling"   # Exclude adult/gambling TLDs
+dotseek -k "tech,business" myapp     # Include tech/business TLDs
+dotseek -ek "adult,gambling" myapp   # Exclude adult/gambling TLDs
 ```
 
 ### Display Options
 
 Show all domains (available and unavailable):
 ```bash
-dotseek myapp -a
+dotseek -a myapp
 ```
 
 Include premium domains in results:
 ```bash
-dotseek myapp -p
+dotseek -p myapp
 ```
 
 Show TLD descriptions:
 ```bash
-dotseek myapp -d
+dotseek -d myapp
 # or
-dotseek myapp -tld-descriptions
+dotseek -tld-descriptions myapp
 ```
 
 ### Cache Management
 
 Disable cache for current run:
 ```bash
-dotseek myapp -no-cache
+dotseek -no-cache myapp
 ```
 
 Clear cache file:
@@ -128,14 +128,14 @@ dotseek -clear-cache
 
 Set custom cache age (in seconds):
 ```bash
-dotseek myapp -cache-age 3600  # 1 hour
+dotseek -cache-age 3600 myapp  # 1 hour
 ```
 
 ### Custom TLD File
 
 Use a custom TLD file instead of the default sources:
 ```bash
-dotseek myapp -tld-file custom_tlds.csv
+dotseek -tld-file custom_tlds.csv myapp
 ```
 
 ## TLD File Format
@@ -195,25 +195,25 @@ Premium:     12
 ### Startup Domain Search
 ```bash
 # Find short, tech-focused domains for a startup
-dotseek mystartup -l "<=4" -k "tech,startup" -p -d
+dotseek -l "<=4" -k "tech,startup" -p -d mystartup
 ```
 
 ### E-commerce Domain Search  
 ```bash
 # Find business-appropriate domains, excluding adult content
-dotseek mystore -k "business,commercial" -ek "adult,gambling" -a
+dotseek -k "business,commercial" -ek "adult,gambling" -a mystore
 ```
 
 ### Developer Portfolio
 ```bash
 # Find developer-focused domains with descriptions
-dotseek johndoe -k "tech,development,personal" -d
+dotseek -k "tech,development,personal" -d johndoe
 ```
 
 ### Comprehensive Domain Research
 ```bash
 # Check everything, show all results with detailed info
-dotseek brandname -a -p -d -cache-age 7200
+dotseek -a -p -d -cache-age 7200 brandname
 ```
 
 ## Command-Line Options
@@ -310,5 +310,5 @@ Enable verbose output by checking API responses and using cache debugging:
 ```bash
 # Clear cache and run with fresh data
 dotseek -clear-cache
-dotseek myapp -no-cache -a -d
+dotseek -no-cache -a -d myapp
 ```
