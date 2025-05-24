@@ -732,7 +732,7 @@ func main() {
 	}
 
 	if hiddenAvailablePremiumCount > 0 {
-		fmt.Printf("\n%sNote: %d premium domain(s) available.\n\tUse -p flag to show%s\n",
+		fmt.Printf("\n%sNote: %d premium domain(s) available.\n\t\tUse -p flag to show%s\n",
 			colorYellow, hiddenAvailablePremiumCount, colorReset)
 	}
 	if useSandbox {
