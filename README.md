@@ -1,6 +1,6 @@
 # DotSeek
 
-**DotSeek** is a powerful command-line tool for checking domain availability using the Namecheap API. It provides intelligent caching, TLD filtering, and batch processing capabilities to help you find the perfect domain name efficiently.
+**DotSeek** is a powerful command-line tool for checking domain availability using the Namecheap API. It provides intelligent caching, TLD filtering, batch processing capabilities, and flexible export options to help you find the perfect domain name efficiently.
 
 ## Features
 
@@ -9,6 +9,7 @@
 - **Premium Detection**: Identify premium domains with pricing indicators
 - **Smart Caching**: Configurable cache with automatic expiration
 - **Colored Output**: Easy-to-read results with color-coded availability
+- **Multiple Export Formats**: Export results to JSON, XML, YAML, TOML, or CSV
 - **Multiple TLD Sources**: Remote URL, local file, or embedded TLD lists
 - **Sandbox Support**: Test with Namecheap's sandbox environment
 - **TLD Descriptions**: Optional keyword descriptions for TLD context
@@ -114,6 +115,36 @@ dotseek -d myapp
 dotseek -tld-descriptions myapp
 ```
 
+### Export Options
+
+Export results to various formats:
+
+```bash
+# Export to JSON (format inferred from extension)
+dotseek -o results.json myapp
+
+# Export to CSV
+dotseek -o domains.csv myapp
+
+# Export with explicit format (overrides extension)
+dotseek -o myfile.txt -f yaml myapp
+
+# Export using format only (creates default filename)
+dotseek -f json myapp  # Creates results.json
+```
+
+Supported export formats:
+- **JSON**: Structured data with full details
+- **XML**: Hierarchical format for system integration
+- **YAML**: Human-readable configuration format
+- **TOML**: Simple configuration format
+- **CSV**: Spreadsheet-compatible format
+
+All export formats include:
+- Timestamp of when the check was performed
+- Total domains evaluated, available, unavailable, and premium counts
+- Complete results for all evaluated domains (not just displayed ones)
+
 ### Cache Management
 
 Disable cache for current run:
@@ -216,6 +247,18 @@ dotseek -k "tech,development,personal" -d johndoe
 dotseek -a -p -d -cache-age 7200 brandname
 ```
 
+### Domain Research with Export
+```bash
+# Check domains and export to JSON for analysis
+dotseek -k "tech,startup" -o analysis.json mystartup
+
+# Export all results to CSV for spreadsheet analysis
+dotseek -a -p -o domains.csv -f csv brandname
+
+# Export only available domains to YAML
+dotseek -o available.yaml myapp
+```
+
 ## Command-Line Options
 
 | Option | Short | Description |
@@ -228,6 +271,8 @@ dotseek -a -p -d -cache-age 7200 brandname
 | `--a` | `-a` | Show all domains (available and unavailable) |
 | `--tld-descriptions` | `-d` | Show TLD keyword descriptions |
 | `--tld-file` | | Path to custom TLD file |
+| `--output` | `-o` | Output to file (format inferred from extension) |
+| `--format` | `-f` | Output format (json\|xml\|yaml\|toml\|csv) |
 | `--no-cache` | | Disable cache for this run |
 | `--clear-cache` | | Clear cache file and exit |
 | `--cache-age` | | Maximum cache age in seconds (default: 86400) |
@@ -257,6 +302,7 @@ DotSeek provides comprehensive error handling for:
 - **Invalid Domains**: Malformed domain name detection
 - **Missing Config**: Clear messages for missing credentials
 - **File Errors**: TLD file reading and parsing issues
+- **Export Errors**: Invalid format or file writing issues
 
 ## Rate Limiting
 
@@ -297,6 +343,10 @@ Copyright 2025 Brian Samson <brian@samson.zone>
 - Check internet connectivity for remote TLD fetching
 - Verify local `tlds.txt` file format if using local file
 - Ensure embedded TLD list is present in binary
+
+**"Cannot infer format from filename"**
+- Use the `-f` flag to explicitly specify the output format
+- Or use a standard file extension (.json, .xml, .yaml, .toml, .csv)
 
 **Cache Issues**
 - Use `--clear-cache` to reset cache file

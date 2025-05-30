@@ -1,4 +1,3 @@
-// Copyright 2025 Brian Samson <brian@samson.zone>
 package main
 
 import (
@@ -22,7 +21,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/joho/godotenv"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -79,6 +80,25 @@ type ProcessedResult struct {
 	SourceInfo     string
 	IsAvailable    bool
 	TLDDescription string
+}
+
+// Output structures for different formats
+type DomainResult struct {
+	Domain      string `json:"domain" yaml:"domain" toml:"domain" xml:"domain"`
+	Available   bool   `json:"available" yaml:"available" toml:"available" xml:"available"`
+	Premium     bool   `json:"premium" yaml:"premium" toml:"premium" xml:"premium"`
+	TLD         string `json:"tld,omitempty" yaml:"tld,omitempty" toml:"tld,omitempty" xml:"tld,omitempty"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty" toml:"description,omitempty" xml:"description,omitempty"`
+}
+
+type OutputData struct {
+	XMLName          xml.Name       `xml:"domain_check_results" json:"-" yaml:"-" toml:"-"`
+	Timestamp        string         `json:"timestamp" yaml:"timestamp" toml:"timestamp" xml:"timestamp"`
+	TotalEvaluated   int            `json:"total_evaluated" yaml:"total_evaluated" toml:"total_evaluated" xml:"total_evaluated"`
+	TotalAvailable   int            `json:"total_available" yaml:"total_available" toml:"total_available" xml:"total_available"`
+	TotalUnavailable int            `json:"total_unavailable" yaml:"total_unavailable" toml:"total_unavailable" xml:"total_unavailable"`
+	TotalPremium     int            `json:"total_premium" yaml:"total_premium" toml:"total_premium" xml:"total_premium"`
+	Results          []DomainResult `json:"results" yaml:"results" toml:"results" xml:"results>result"`
 }
 
 type NamecheapAPIResponse struct {
@@ -406,17 +426,17 @@ func formatResultForDisplay(
 	showAll, includePremium bool,
 	sourceInfo string,
 ) *ProcessedResult {
-	if !wasExplicit {
-		if isPremium && !includePremium {
-			if isAvailable {
-				hiddenAvailablePremiumCount++
-			}
-			return nil
+	// Apply filtering logic to ALL domains, not just non-explicit ones
+	if isPremium && !includePremium {
+		if isAvailable {
+			hiddenAvailablePremiumCount++
 		}
-		if !isAvailable && !showAll {
-			return nil
-		}
+		return nil
 	}
+	if !isAvailable && !showAll {
+		return nil
+	}
+
 	prem := ""
 	if isPremium {
 		prem = " $"
@@ -424,7 +444,7 @@ func formatResultForDisplay(
 	var pre, suf string
 	if isAvailable {
 		pre, suf = colorGreen, colorReset
-	} else if wasExplicit || showAll {
+	} else if showAll {
 		pre, suf = colorRed, colorReset
 	}
 
@@ -486,6 +506,102 @@ func processAPIResponseChunk(
 	return out
 }
 
+func inferFormatFromFilename(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".json":
+		return "json"
+	case ".xml":
+		return "xml"
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".toml":
+		return "toml"
+	case ".csv":
+		return "csv"
+	default:
+		return ""
+	}
+}
+
+func writeOutputFile(filename, format string, data OutputData) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer file.Close()
+
+	switch format {
+	case "json":
+		encoder := json.NewEncoder(file)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(data)
+
+	case "xml":
+		file.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+		encoder := xml.NewEncoder(file)
+		encoder.Indent("", "  ")
+		defer encoder.Close()
+		return encoder.Encode(data)
+
+	case "yaml":
+		encoder := yaml.NewEncoder(file)
+		defer encoder.Close()
+		return encoder.Encode(data)
+
+	case "toml":
+		encoder := toml.NewEncoder(file)
+		return encoder.Encode(data)
+
+	case "csv":
+		writer := csv.NewWriter(file)
+		defer writer.Flush()
+
+		// Write header
+		headers := []string{"domain", "available", "premium"}
+		if len(data.Results) > 0 && data.Results[0].TLD != "" {
+			headers = append(headers, "tld")
+		}
+		if len(data.Results) > 0 && data.Results[0].Description != "" {
+			headers = append(headers, "description")
+		}
+		if err := writer.Write(headers); err != nil {
+			return err
+		}
+
+		// Write data
+		for _, result := range data.Results {
+			record := []string{
+				result.Domain,
+				strconv.FormatBool(result.Available),
+				strconv.FormatBool(result.Premium),
+			}
+			if len(headers) > 3 {
+				record = append(record, result.TLD)
+			}
+			if len(headers) > 4 {
+				record = append(record, result.Description)
+			}
+			if err := writer.Write(record); err != nil {
+				return err
+			}
+		}
+
+		// Write summary as comment
+		writer.Write([]string{
+			fmt.Sprintf("# Total evaluated: %d", data.TotalEvaluated),
+			fmt.Sprintf("Available: %d", data.TotalAvailable),
+			fmt.Sprintf("Unavailable: %d", data.TotalUnavailable),
+			fmt.Sprintf("Premium: %d", data.TotalPremium),
+		})
+
+		return nil
+
+	default:
+		return fmt.Errorf("unsupported format: %s", format)
+	}
+}
+
 func main() {
 	loadAndSetEnvVars()
 
@@ -501,10 +617,19 @@ func main() {
 	noCache := flag.Bool("no-cache", false, "Disable cache")
 	clearCacheFlg := flag.Bool("clear-cache", false, "Clear cache")
 	cacheAge := flag.Int64("cache-age", cacheMaxAgeSeconds, "Max cache age")
+	outputFile := flag.String("output", "", "Output to file (format inferred from extension)")
+	flag.StringVar(outputFile, "o", "", "Shorthand for --output")
+	outputFormat := flag.String("format", "", "Output format (json|xml|yaml|toml|csv, overrides extension)")
+	flag.StringVar(outputFormat, "f", "", "Shorthand for --format")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [opts] <domain>...\n", filepath.Base(os.Args[0]))
 		flag.PrintDefaults()
+		fmt.Fprintln(os.Stderr, "\nOutput examples:")
+		fmt.Fprintln(os.Stderr, "  -o results.json                    # Output to JSON (format inferred)")
+		fmt.Fprintln(os.Stderr, "  -o data.csv                        # Output to CSV (format inferred)")
+		fmt.Fprintln(os.Stderr, "  -o myfile.txt -f yaml              # Output to YAML (format explicit)")
+		fmt.Fprintln(os.Stderr, "  -f json                            # Output to results.json (default name)")
 	}
 	flag.Parse()
 	showTLDDescriptions = cliDesc
@@ -714,6 +839,19 @@ func main() {
 		return results[i].DomainName < results[j].DomainName
 	})
 
+	// Prepare output data if needed
+	var outputData OutputData
+	needsOutput := *outputFile != "" || *outputFormat != ""
+
+	if needsOutput {
+		outputData.Timestamp = time.Now().Format(time.RFC3339)
+		outputData.TotalEvaluated = len(all)
+		outputData.TotalAvailable = totalAvailable
+		outputData.TotalUnavailable = totalUnavailable
+		outputData.TotalPremium = totalPremium
+	}
+
+	// Display results to console
 	fmt.Printf("\n--- Results (%d matching criteria) ---\n", len(results))
 	if len(results) == 0 {
 		fmt.Println("No domains matched your criteria.")
@@ -732,7 +870,7 @@ func main() {
 	}
 
 	if hiddenAvailablePremiumCount > 0 {
-		fmt.Printf("\n%sNote: %d premium domain(s) available.\n\t\tUse -p flag to show%s\n",
+		fmt.Printf("\n%sNote: %d premium domain(s) available.\nUse -p flag to show%s\n",
 			colorYellow, hiddenAvailablePremiumCount, colorReset)
 	}
 	if useSandbox {
@@ -748,5 +886,96 @@ func main() {
 		fmt.Printf("Available:   %s%d%s\n", colorGreen, totalAvailable, colorReset)
 		fmt.Printf("Unavailable: %s%d%s\n", colorRed, totalUnavailable, colorReset)
 		fmt.Printf("Premium:     %s%d%s\n", colorYellow, totalPremium, colorReset)
+	}
+
+	// Write output file if requested
+	if needsOutput {
+		// Collect all domain results from cache (which now has all the data)
+		var allDomainResults []DomainResult
+
+		for _, d := range all {
+			var avail, prem bool
+
+			// Check cache for the data
+			if ent, ok := cacheData[d]; ok {
+				avail = ent.Attributes.Available == "true"
+				prem = ent.Attributes.IsPremiumName == "true"
+			}
+
+			dr := DomainResult{
+				Domain:    d,
+				Available: avail,
+				Premium:   prem,
+			}
+
+			// Extract TLD
+			parts := strings.SplitN(d, ".", 2)
+			if len(parts) == 2 {
+				dr.TLD = parts[1]
+			}
+
+			// Get description if enabled
+			if *showTLDDescriptions {
+				for _, t := range gSortedTldKeys {
+					if strings.HasSuffix(d, "."+t) {
+						dr.Description = gTldKeywordsMap[t]
+						break
+					}
+				}
+			}
+
+			allDomainResults = append(allDomainResults, dr)
+		}
+
+		// Sort all results for output
+		sort.Slice(allDomainResults, func(i, j int) bool {
+			if allDomainResults[i].Available != allDomainResults[j].Available {
+				return allDomainResults[i].Available
+			}
+			return allDomainResults[i].Domain < allDomainResults[j].Domain
+		})
+
+		outputData.Results = allDomainResults
+
+		// Determine output filename and format
+		outputFilename := *outputFile
+		format := *outputFormat
+
+		if format == "" && outputFilename != "" {
+			// Try to infer format from filename
+			format = inferFormatFromFilename(outputFilename)
+			if format == "" {
+				fmt.Fprintf(os.Stderr, "\nError: Cannot infer format from filename '%s'. Please specify format with -f flag.\n", outputFilename)
+				os.Exit(1)
+			}
+		} else if format != "" && outputFilename == "" {
+			// Use default filename based on format
+			outputFilename = "results." + format
+		} else if format == "" && outputFilename == "" {
+			// This shouldn't happen due to needsOutput check, but just in case
+			fmt.Fprintln(os.Stderr, "\nError: No output file or format specified.")
+			os.Exit(1)
+		}
+
+		// Validate format
+		validFormats := map[string]bool{
+			"json": true,
+			"xml":  true,
+			"yaml": true,
+			"toml": true,
+			"csv":  true,
+		}
+		if !validFormats[format] {
+			fmt.Fprintf(os.Stderr, "\nError: Invalid format '%s'. Valid formats: json, xml, yaml, toml, csv\n", format)
+			os.Exit(1)
+		}
+
+		// Write the file
+		if err := writeOutputFile(outputFilename, format, outputData); err != nil {
+			fmt.Fprintf(os.Stderr, "\nError writing output file: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("\nResults written to: %s (format: %s)\n", outputFilename, format)
 	}
 }
