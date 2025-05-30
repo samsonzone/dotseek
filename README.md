@@ -24,7 +24,7 @@
 ### Build from Source
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/samsonzone/dotseek.git
 cd dotseek
 go mod tidy
 go build -o dotseek
